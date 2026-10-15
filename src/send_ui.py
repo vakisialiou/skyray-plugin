@@ -10,21 +10,15 @@ from .send_job import CHANNELS, DRAW_CALL_WARNING
 from .status import STORAGE_FULL_TEXT
 from .ui_text import ago, alert, duration, megabytes, note, primary, storage_size, thousands, wrap
 from .world_hdri_sync import describe_world_hdri_source, hdri_problem
-from .world_sync import find_world_sky
+from .world_sync import SKY_NAMES, sky_to_send
 
 _ROWS = {
     "objects": ("Objects", "OBJECT_DATA", "skyray.send_scene"),
     "lights": ("Lights", "LIGHT", "skyray.send_lighting"),
     "camera": ("Camera", "CAMERA_DATA", "skyray.send_camera"),
-    "sky": ("Sky", "WORLD", "skyray.send_world"),
+    "world": ("World", "WORLD", "skyray.send_world"),
     "hdri": ("HDRI", "IMAGE_DATA", "skyray.send_world_hdri"),
     "render": ("Render", "SCENE", "skyray.send_render_settings"),
-}
-_SKY_NAMES = {
-    "SINGLE_SCATTERING": "Single scattering",
-    "MULTIPLE_SCATTERING": "Multiple scattering",
-    "PREETHAM": "Preetham",
-    "HOSEK_WILKIE": "Hosek-Wilkie",
 }
 
 # Row summaries are recounted at most this often while the panel redraws.
@@ -41,7 +35,7 @@ def _summary(context) -> dict:
     if cached is not None and now - cached[0] < _SUMMARY_TTL_S:
         return cached[1]
     found = scene_graph.summary(scene, context.view_layer, scene.skyray_scope, settings.skip_hidden)
-    found["sky"] = _sky_text(scene)
+    found["world"] = _world_text(scene)
     found["hdri"] = describe_world_hdri_source(context) or "None"
     found["hdri_problem"] = hdri_problem(scene)
     view = scene.view_settings.view_transform
@@ -51,11 +45,13 @@ def _summary(context) -> dict:
     return found
 
 
-def _sky_text(scene) -> str:
-    found = find_world_sky(scene.world)
-    if found is None:
-        return "No sky"
-    return _SKY_NAMES.get(found[0].sky_type, found[0].sky_type.title())
+def _world_text(scene) -> str:
+    if scene.world is None:
+        return "No World"
+    sky, problem = sky_to_send(scene.world)
+    if sky is None:
+        return f"Color only: {problem}"
+    return SKY_NAMES.get(sky[0].sky_type, sky[0].sky_type.title())
 
 
 def _info(channel: str, found: dict) -> str:
@@ -107,6 +103,10 @@ def draw_rows(layout, context, enabled: bool) -> None:
         button.operator(operator, text="", icon="EXPORT")
 
 
+def _sent_text(text: str, row) -> str:
+    return f"{text} · {row.note}" if row.note else text
+
+
 def _draw_job_cell(layout, job, channel: str) -> None:
     row = job.rows[channel]
     if row.state == "working" and channel == "objects":
@@ -118,7 +118,7 @@ def _draw_job_cell(layout, job, channel: str) -> None:
         cell.label(text="Sending…", icon="TIME")
     elif row.state == "sent":
         cell.active = False
-        cell.label(text="Sent", icon="CHECKMARK")
+        cell.label(text=_sent_text("Sent", row), icon="CHECKMARK")
     elif row.state == "skipped":
         cell.active = False
         cell.label(text=row.note or "Skipped")
@@ -137,7 +137,7 @@ def _draw_report_cell(layout, report, channel: str, now: float) -> None:
     row = report.rows[channel]
     if row.state == "sent":
         layout.active = False
-        layout.label(text=f"Sent {ago(report.finished_at, now)}", icon="CHECKMARK")
+        layout.label(text=_sent_text(f"Sent {ago(report.finished_at, now)}", row), icon="CHECKMARK")
     elif row.state == "skipped":
         layout.active = False
         layout.label(text=row.note or "Nothing to send")

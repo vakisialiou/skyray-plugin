@@ -42,8 +42,8 @@ from .uploader import StorageFull, Uploader
 from .world_hdri_sync import Unreadable, build_hdri_cached, describe_world_hdri_source
 
 # Rows of the panel, top to bottom.
-CHANNELS = ("objects", "lights", "camera", "sky", "hdri", "render")
-_SMALL = ("render", "sky", "camera", "lights")
+CHANNELS = ("objects", "lights", "camera", "world", "hdri", "render")
+_SMALL = ("render", "world", "camera", "lights")
 
 _STEP_BUDGET_S = 0.03
 _REDRAW_EVERY_S = 0.1
@@ -317,7 +317,7 @@ class SendJob:
             if built.skip:
                 self.rows[channel] = Row(state="skipped", note=built.skip)
                 continue
-            self.rows[channel] = Row(state="working", total=1)
+            self.rows[channel] = Row(state="working", total=1, note=built.note)
             self.uploader.sync(built.event, built.payload, channel)
             yield
 
@@ -489,7 +489,7 @@ _LABELS = {
     "objects": "objects",
     "lights": "lights",
     "camera": "camera",
-    "sky": "sky",
+    "world": "World",
     "hdri": "HDRI",
     "render": "render settings",
 }

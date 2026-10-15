@@ -1,5 +1,17 @@
-"""Active World's Sky Texture node (Nishita: Single or Multiple Scattering) →
-plain-dict payload.
+"""Active World → plain-dict payload: its viewport color, and the Sky
+Texture (Nishita: Single or Multiple Scattering) it renders.
+
+`color` goes whatever the World's nodes hold: it is the World's viewport
+color, the browser's Wireframe/Solid World background (5.x renders a World
+through its nodes only; use_nodes is deprecated and always on). The rest of
+World was audited and isn't sent, nothing in the browser applies it:
+mist_settings (the Mist pass), light_settings (ambient occlusion factor and
+distance), lightgroup (light group passes), probe_resolution and the sun_*
+settings (EEVEE's world probe and the sun light it extracts; the browser
+bakes its own sky and extracts no sun), use_eevee_finite_volume (a legacy
+conversion flag), and Cycles' `cycles` sampling and `cycles_visibility` ray
+visibility (a World hidden from the camera that still lights the scene has
+no browser counterpart).
 
 find_world_sky() returns only a Sky the World really renders: it walks back
 from the active World Output's Surface along links as Blender evaluates them
@@ -27,6 +39,12 @@ _EMITTER_NODE_TYPES = {"ShaderNodeBackground", "ShaderNodeEmission"}
 # The two Nishita models the browser renders. PREETHAM/HOSEK_WILKIE (Blender's
 # "Legacy" types) are different analytic models and aren't sent.
 SUPPORTED_SKY_TYPES = {"SINGLE_SCATTERING", "MULTIPLE_SCATTERING"}
+SKY_NAMES = {
+    "SINGLE_SCATTERING": "Single scattering",
+    "MULTIPLE_SCATTERING": "Multiple scattering",
+    "PREETHAM": "Preetham",
+    "HOSEK_WILKIE": "Hosek-Wilkie",
+}
 
 
 def _source(socket: bpy.types.NodeSocket) -> bpy.types.NodeSocket | None:
@@ -121,7 +139,24 @@ def emitter_strength(emitter: bpy.types.ShaderNode | None) -> float | None:
     return None
 
 
-def build_world_sync(sky: bpy.types.ShaderNodeTexSky, strength: float, engine: str) -> dict:
+def sky_to_send(
+    world: bpy.types.World,
+) -> tuple[tuple[bpy.types.ShaderNodeTexSky, float] | None, str]:
+    """((sky, strength), "") for a Sky the browser renders, else (None, why
+    not) worded for the panel; the World's color goes either way."""
+    found = find_world_sky(world)
+    if found is None:
+        return None, "no Sky Texture"
+    sky, emitter = found
+    if sky.sky_type not in SUPPORTED_SKY_TYPES:
+        return None, f"{SKY_NAMES.get(sky.sky_type, sky.sky_type)} sky isn't supported"
+    strength = emitter_strength(emitter)
+    if strength is None:
+        return None, "sky strength is driven by nodes"
+    return (sky, strength), ""
+
+
+def build_sky(sky: bpy.types.ShaderNodeTexSky, strength: float, engine: str) -> dict:
     """Every input the Nishita models read, for a SUPPORTED_SKY_TYPES sky.
     Not sent: `turbidity`, `ground_albedo` and `sun_direction`
     (PREETHAM/HOSEK_WILKIE only), `texture_mapping` (legacy, not in the UI),
