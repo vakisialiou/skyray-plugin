@@ -16,4 +16,4 @@ PLUGIN_VERSION = ".".join(str(part) for part in bl_info["version"])
 # Bumped whenever the exported glb changes for the same scene (exporter
 # flags, packing, bake logic), so an object key from an older add-on never
 # matches a newer export.
-EXPORT_VERSION = 5
+EXPORT_VERSION = 6

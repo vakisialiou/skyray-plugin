@@ -30,10 +30,11 @@ from .material_bake import (
     cleanup_baked_materials,
     cleanup_duplicate_mesh,
 )
-from .material_coat import apply_coat_extras, collect_coat_extras, inject_coat_extras
+from .material_coat import apply_coat_extras, collect_coat_extras
 from .material_flatten import flatten_incompatible_surfaces
+from .material_thickness import apply_thickness_extras, collect_thickness_extras
 from .material_volume import approximate_volume_materials
-from .resource_pack import Pack, pack_separate
+from .resource_pack import Pack, edit_glb, pack_separate
 from .shader_bake import bake_size
 from .texture_cap import cap_textures
 from .web_settings import Snapshot
@@ -96,7 +97,7 @@ def _clip_name(obj: bpy.types.Object) -> dict:
 
 def export_object(obj: bpy.types.Object, settings: Snapshot, surface_area: float = 0.0) -> Pack:
     """`obj` as the Send uploads it. `surface_area` (world m²) sizes By Object Size bakes."""
-    with _prepared(obj, settings, surface_area) as coat_extras:
+    with _prepared(obj, settings, surface_area) as complete_materials:
         with tempfile.TemporaryDirectory() as tmp_dir:
             bpy.ops.export_scene.gltf(
                 filepath=os.path.join(tmp_dir, "object.gltf"),
@@ -105,13 +106,13 @@ def export_object(obj: bpy.types.Object, settings: Snapshot, surface_area: float
                 **_clip_name(obj),
                 **_format_options(settings, _animated(obj)),
             )
-            return pack_separate(tmp_dir, "object.gltf", lambda gltf: apply_coat_extras(gltf, coat_extras))
+            return pack_separate(tmp_dir, "object.gltf", complete_materials)
 
 
 def export_object_glb(obj: bpy.types.Object, settings: Optional[Snapshot] = None) -> bytes:
     """`obj` through the same pipeline, as one self-contained glb (images inside)."""
     settings = settings or LOSSLESS
-    with _prepared(obj, settings, 0.0) as coat_extras:
+    with _prepared(obj, settings, 0.0) as complete_materials:
         with tempfile.TemporaryDirectory() as tmp_dir:
             glb_path = os.path.join(tmp_dir, "object.glb")
             bpy.ops.export_scene.gltf(
@@ -122,7 +123,7 @@ def export_object_glb(obj: bpy.types.Object, settings: Optional[Snapshot] = None
                 **_format_options(settings, _animated(obj)),
             )
             with open(glb_path, "rb") as glb_file:
-                return inject_coat_extras(glb_file.read(), coat_extras)
+                return edit_glb(glb_file.read(), complete_materials)
 
 
 def _selected(view_layer: bpy.types.ViewLayer) -> list:
@@ -139,8 +140,10 @@ def _deselect_all(view_layer: bpy.types.ViewLayer) -> None:
 def _prepared(obj: bpy.types.Object, settings: Snapshot, surface_area: float):
     """Builds `obj`'s export copy (plus skin + animation, if it has an
     Armature modifier) at the origin, preprocessed for glTF, selected alone;
-    yields the coat extras to complete after the export; removes everything
-    it made on the way out, the original selection restored.
+    yields the pass that completes the exported glTF's materials with what
+    the exporter can't write (material_coat.py, material_thickness.py);
+    removes everything it made on the way out, the original selection
+    restored.
 
     Temporary duplicates keep the originals untouched. Duplicates share
     mesh/armature data, so this stays cheap until a preprocessing step needs
@@ -215,11 +218,17 @@ def _prepared(obj: bpy.types.Object, settings: Snapshot, surface_area: float):
             approximate_volume_materials(duplicate, preprocessed_materials)
         cap_textures(duplicate, settings.max_texture, preprocessed_materials)
         coat_extras = collect_coat_extras(duplicate)
+        thickness_extras = collect_thickness_extras(duplicate)
+
+        def complete_materials(gltf: dict) -> bool:
+            coat = apply_coat_extras(gltf, coat_extras)
+            thickness = apply_thickness_extras(gltf, thickness_extras)
+            return coat or thickness
 
         if duplicate_armature is not None:
             duplicate_armature.select_set(True)
 
-        yield coat_extras
+        yield complete_materials
     finally:
         cleanup_baked_materials(preprocessed_materials)
         # Read only now: any preprocessing step may have swapped
