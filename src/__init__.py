@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Skyray",
     "author": "Skyray",
-    "version": (0, 6, 0),
+    "version": (0, 6, 1),
     "blender": (5, 2, 1),
     "location": "View3D > Sidebar > Skyray",
     "description": "Sends the current scene to your Skyray account for live preview in the browser",
