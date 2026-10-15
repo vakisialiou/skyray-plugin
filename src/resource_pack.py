@@ -47,9 +47,27 @@ def content_key(prefix: str, data: bytes) -> str:
     return f"{prefix}:{hashlib.sha256(data).hexdigest()[:32]}"
 
 
+def edit_glb(glb: bytes, edit_json) -> bytes:
+    """`edit_json(gltf)` on a GLB's parsed JSON chunk, True when it changed
+    anything. Rewrites only that chunk (the BIN chunk is copied verbatim); a
+    GLB with nothing to change comes back byte-identical."""
+    magic, version, _length = struct.unpack_from("<4sII", glb, 0)
+    json_length, json_type = struct.unpack_from("<I4s", glb, 12)
+    if magic != b"glTF" or json_type != b"JSON":
+        raise ValueError("not a GLB with a leading JSON chunk")
+    gltf = json.loads(glb[20 : 20 + json_length])
+    if not edit_json(gltf):
+        return glb
+
+    chunk = json.dumps(gltf, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    chunk += b" " * (-len(chunk) % 4)  # GLB chunks are 4-byte aligned, JSON padded with spaces
+    body = struct.pack("<I4s", len(chunk), b"JSON") + chunk + glb[20 + json_length :]
+    return struct.pack("<4sII", magic, version, 12 + len(body)) + body
+
+
 def pack_separate(directory: str, gltf_name: str, edit_json=None) -> Pack:
     """Reads `directory/gltf_name` (+ its .bin and image files) and packs it.
-    `edit_json(gltf)` may change the parsed JSON first (coat extras)."""
+    `edit_json(gltf)` may change the parsed JSON first (material extras)."""
     with open(os.path.join(directory, gltf_name), "rb") as handle:
         gltf = json.load(handle)
     if edit_json is not None:

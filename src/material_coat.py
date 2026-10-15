@@ -5,7 +5,7 @@ Coat Normal (material_bake.py bakes procedural ones first), but never Coat IOR
 or Coat Tint, and omits clearcoatRoughnessFactor within 1e-5 of Blender's own
 default 0.03 (BLENDER_COAT_ROUGHNESS) — glTF's default is 0.
 
-A post-pass on the exported GLB's JSON chunk, per material that has
+A post-pass on the exported glTF JSON, per material that has
 KHR_materials_clearcoat:
 - `extras.coat = {ior, tint}` (tint scene-linear RGB), each only when its
   input is constant and not Blender's default — a procedural one isn't
@@ -22,8 +22,6 @@ Not a glTF2ExportUserExtension hook: io_scene_gltf2 discovers those only on
 enabled add-ons (and would then also change the user's own File > Export).
 """
 
-import json
-import struct
 from contextlib import contextmanager
 from typing import Iterator, Optional
 
@@ -134,22 +132,3 @@ def apply_coat_extras(gltf: dict, coat_extras: dict) -> bool:
             clearcoat["clearcoatRoughnessFactor"] = coat["roughness"]
             changed = True
     return changed
-
-
-def inject_coat_extras(glb: bytes, coat_extras: dict) -> bytes:
-    """apply_coat_extras on a GLB: rewrites only the JSON chunk (the BIN chunk
-    is copied verbatim); a GLB with nothing to add comes back byte-identical."""
-    if not coat_extras:
-        return glb
-    magic, version, _length = struct.unpack_from("<4sII", glb, 0)
-    json_length, json_type = struct.unpack_from("<I4s", glb, 12)
-    if magic != b"glTF" or json_type != b"JSON":
-        raise ValueError("not a GLB with a leading JSON chunk")
-    gltf = json.loads(glb[20 : 20 + json_length])
-    if not apply_coat_extras(gltf, coat_extras):
-        return glb
-
-    chunk = json.dumps(gltf, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    chunk += b" " * (-len(chunk) % 4)  # GLB chunks are 4-byte aligned, JSON padded with spaces
-    body = struct.pack("<I4s", len(chunk), b"JSON") + chunk + glb[20 + json_length :]
-    return struct.pack("<4sII", magic, version, 12 + len(body)) + body
