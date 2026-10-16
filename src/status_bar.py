@@ -25,7 +25,11 @@ def text(current: status.Status, scene) -> str:
     color, word = connection_ui.state_dot(current, scene)
     if current.state in (status.READY, status.NO_BROWSER) and color != "red":
         name = _short(current.project_name)
-        return f"Skyray · {name}" if current.state == status.READY else f"Skyray · {name} · open browser"
+        if current.state == status.READY:
+            return f"Skyray · {name}"
+        if current.message == status.LOADING_TEXT:
+            return f"Skyray · {name} · browser loading"
+        return f"Skyray · {name} · open browser"
     return f"Skyray · {word}"
 
 

@@ -36,7 +36,7 @@ def state_dot(current: status.Status, scene) -> tuple:
     if state == status.NO_PROJECT:
         return "amber", "No project"
     if state == status.NO_BROWSER:
-        return "amber", "Browser closed"
+        return "amber", "Browser loading" if current.message == status.LOADING_TEXT else "Browser closed"
     report = send_job.report_for(scene) if scene is not None else None
     if report is not None and not report.ok:
         return "red", "Stopped"
@@ -136,6 +136,9 @@ def draw_setup_card(layout, context, current: status.Status) -> None:
         return
     if state == status.NO_BROWSER:
         draw_project_row(box, context, "amber")
+        if current.message == status.LOADING_TEXT:
+            wrap(box, context, "The project is loading in the browser: Send opens once it shows.", icon="TIME")
+            return
         wrap(box, context, "Open the project in a browser tab to send.", icon="WINDOW")
         primary(box, "skyray.open_project", "Open in Browser", "URL")
 

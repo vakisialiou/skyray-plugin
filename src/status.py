@@ -31,6 +31,8 @@ CHECKING_TEXT = "Checking the project…"
 FOREIGN_TEXT = "Project belongs to another account"
 NOT_FOUND_TEXT = "Project not found"
 NO_BROWSER_TEXT = "Browser not open"
+# A browser has the project's scene open, its editor not shown yet: Send waits for it.
+LOADING_TEXT = "Browser loading…"
 REVOKED_TEXT = "Device disconnected in the browser"
 NO_VIEWERS_TEXT = "Open the project in a browser first"
 STORAGE_FULL_TEXT = "Send stopped — storage full"
@@ -131,9 +133,11 @@ def evaluate(snapshot, online: bool, bound_id: str, bound_name: str) -> Status:
         return _with(base, NO_PROJECT, NOT_FOUND_TEXT)
 
     viewers = beat.get("viewers") if isinstance(beat.get("viewers"), int) else 0
+    # Windows whose scene still loads; a server that doesn't count them sends none.
+    loading = beat.get("loading") if isinstance(beat.get("loading"), int) else 0
     verified = replace(base, project_id=bound_id, project_name=str(project.get("name") or bound_name), viewers=viewers)
     if viewers <= 0:
-        return _with(verified, NO_BROWSER, NO_BROWSER_TEXT)
+        return _with(verified, NO_BROWSER, LOADING_TEXT if loading > 0 else NO_BROWSER_TEXT)
     return _with(verified, READY, f"Browser open ({viewers})")
 
 
