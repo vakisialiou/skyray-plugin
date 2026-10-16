@@ -14,9 +14,10 @@ from . import project, runtime, send_job, status
 _POLL_S = 0.1
 
 
-def bind_project(project_id: str, name: str = "", scene: Optional[bpy.types.Scene] = None) -> None:
-    """Binds a scene (the active one by default) to a project, as the dropdown does."""
-    project.bind(scene or bpy.context.scene, project_id, name)
+def bind_project(project_id: str, name: str = "") -> None:
+    """Makes `project_id` this session's project, as Choose does (needs a
+    connection: SKYRAY_TOKEN, or a pairing approved first)."""
+    project.select(project_id, name)
     runtime.refresh()
 
 
@@ -32,7 +33,7 @@ def wait_until(predicate: Callable[[status.Status], bool], timeout: float = 30.0
 
 
 def wait_ready(timeout: float = 30.0) -> status.Status:
-    """Waits for READY (a browser has the scene's project open); returns the final status."""
+    """Waits for READY (a browser shows the session's project); returns the final status."""
     return wait_until(lambda current: current.state == status.READY, timeout)
 
 

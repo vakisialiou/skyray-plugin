@@ -3,9 +3,9 @@
 Load when navigating `src/` or deciding where a new file belongs (placement rule: one `*_operators.py` + `*_sync.py` pair per sync concern — `CLAUDE.md`'s Conventions).
 
 ```
-src/                             # the add-on's code only; ships whole in skyray.zip as skyray/
+src/                             # the add-on's code only; ships whole in every zip as skyray/
 ├── __init__.py                  # bl_info + register()/unregister()
-├── constants.py                 # DEFAULT_SERVER_URL, PROTOCOL_VERSION, CLIENT_KIND, PLUGIN_VERSION (from bl_info), EXPORT_VERSION (part of every object key)
+├── constants.py                 # DEFAULT_SERVER_URL (the build's, build.py sets it), PROTOCOL_VERSION, CLIENT_KIND, PLUGIN_VERSION and ADDON_NAME (from bl_info; the name build.py sets is the panel's title too), EXPORT_VERSION (part of every object key)
 ├── preferences.py               # AddonPreferences: show_header_button; server_url (shown with Developer Extras) — server_url(): env SKYRAY_SERVER_URL > preference > default
 ├── icons.py                     # the logo (icons/logo.png, the panel header) and the status dots (icons/dot_*.png) as preview icons: green ready, amber a step is needed, red a problem, blue sending, grey not connected
 │
@@ -18,18 +18,16 @@ src/                             # the add-on's code only; ships whole in skyray
 ├── view_header.py               # 3D Viewport header button: dot popover + Send All, or progress + Cancel; hidden by the preference
 │
 │   # Connection — device token, heartbeat, status
-├── user_config.py               # the add-on's folder under the user config dir (<user config>/skyray) and atomic JSON writes there (0600)
-├── credentials.py               # device tokens per server in <user config>/skyray/credentials.json; env SKYRAY_TOKEN is used instead, never written
+├── user_config.py               # the add-on's folder under the user config dir (<user config>/skyray) and atomic JSON writes there (0600): link_journal's journals, nothing about the account
 ├── api_client.py                # JSON over HTTP (urllib, certifi CA bundle) and request_bytes() for raw blobs; TransportError when there is no usable answer
 ├── pairing.py                   # RFC 8628 device-code flow: request_code(), poll_token() (pending / slow_down / denied / expired)
-├── connection.py                # daemon worker thread, never bpy: pairing, heartbeat every 3 s (retries 1→2→5→10→30 s; carries a running Send's progress), project list, dev check; lock-guarded state + wake event; INSTANCE_ID per process; Session for other threads
-├── runtime.py                   # main-thread side: 0.5 s timer + load_post/save_post/exit_pre handlers — hands the worker the scene context, sets status.current(), redraws on change (request_redraw() for a running Send), cancels a Send when another file opens, tells link_journal about loads and saves
+├── connection.py                # daemon worker thread, never bpy: pairing, heartbeat every 3 s (retries 1→2→5→10→30 s; carries a running Send's progress), dev check; the session's device token in memory only (SKYRAY_TOKEN instead, for headless), revoked on Disconnect, on stop() — Blender closing, the add-on disabled — and on a server change; lock-guarded state + wake event; INSTANCE_ID per process; Session for other threads
+├── runtime.py                   # main-thread side: 0.5 s timer + load_post/save_post/exit_pre handlers — hands the worker the server and the context (the session's project, file, scene), sets status.current(), redraws on change (request_redraw() for a running Send), clears the project when the connection is gone or another file opens (dropping an older add-on's binding from it), cancels a Send when another file opens, tells link_journal about loads and saves; exit_pre stops the connection (revoking its token)
 ├── status.py                    # status machine, first failing check wins: NOT_CONNECTED (WAITING_APPROVAL) → ONLINE_ACCESS_OFF → CONNECTING/OFFLINE → OUTDATED → NO_PROJECT → NO_BROWSER (Browser loading… while a browser's scene still loads) → READY; UI texts
-├── account_operators.py         # Connect account, Cancel, Open browser again, Disconnect (revokes server-side), Dev: connect without browser (local DEV_TOOLS server), Open Preferences
-├── project.py                   # the scene's binding: Scene properties skyray_project_id (raw field only with Developer Extras) + skyray_project_name (cached display name), bind(); record_binding() journals the project a Send goes to
-├── project_picker.py            # Scene.skyray_project_pick: virtual dropdown over the account's projects (last fetch); get/set read and write the binding, nothing saved
-├── project_operators.py         # Refresh Projects, New project (named after the .blend or the scene — default_name(), then bound), Open in browser, Manage storage… (the web app's Storage settings)
-├── headless.py                  # bind_project(), wait_until(), wait_ready(), send() for `blender -b` scripts, where no timers run (recipe: CLAUDE.md)
+├── account_operators.py         # Connect account (for this Blender session), Cancel, Open browser again, Disconnect (revokes server-side, forgets the project), Dev: connect without browser (local DEV_TOOLS server), Open Preferences
+├── project.py                   # the session's project, in memory only: select(), clear(), rename() from the heartbeat; drop_legacy() removes an older add-on's scene binding from an opened file
+├── project_operators.py         # Choose project (fetch_projects(): the account's list asked on every click, then a search popup), New project (named after the .blend or the scene — default_name(), then chosen), Open in browser, Manage storage… (the web app's Storage settings)
+├── headless.py                  # bind_project() (the session's project), wait_until(), wait_ready(), send() for `blender -b` scripts, where no timers run (recipe: CLAUDE.md)
 │
 │   # Send — the job, its network side, what it covers
 ├── send_job.py                  # SendJob: a Send as short main-thread steps from a timer (small channels, HDRI, then objects: key (a copy's or set's source hashed once) → missing glbs and placements? → bake + export → upload), pause outside Object Mode / off its scene, Cancel, per-channel rows + fraction (an unreadable HDRI fails only its own row), Report; can_send() poll; start(); blocking loop in background mode
@@ -57,7 +55,7 @@ src/                             # the add-on's code only; ships whole in skyray
 ├── shader_bake.py               # shared bake plumbing: bake_size() (per-object resolution), new/tag/is_bake_image, flat_value() (a bake sampled where the faces land in UV space), find_principled_surface(), find_active_output(), emission-rewire socket bake, coat_disabled()
 ├── object_id.py                 # resolve_stable_ids(objects): batch-resolves `skyray_id` (custom property, survives renames) so a duplicate colliding with its original is decided deterministically (the holder this session knew under it, else by name); remembers each id by session_uid, so an undo that drops the property gets it back; get_existing_id(obj) is the side-effect-free lookup for the delete diff
 ├── sent_ids.py                  # ids included in the last successful object Send (Scene property skyray_sent_ids, also remembered for the session) — scene_graph.plan() diffs it to detect deletions
-├── link_journal.py              # what the add-on wrote into the .blend since its last save (object ids, sent ids, the binding a Send used), mirrored to <user config>/skyray/links/<hash of the path>.json against that saved version (size + mtime): replayed by name when the same version is opened again, dropped on save or when the file changed on disk
+├── link_journal.py              # what the add-on wrote into the .blend since its last save (object ids, sent ids), mirrored to <user config>/skyray/links/<hash of the path>.json against that saved version (size + mtime): replayed by name when the same version is opened again, dropped on save or when the file changed on disk
 │
 │   # Channels — one *_operators.py (a SendChannelBase button) + *_sync.py (the payload) per concern
 ├── operators.py                 # SKYRAY_OT_send_scene — the Objects row
@@ -75,4 +73,4 @@ src/                             # the add-on's code only; ships whole in skyray
 └── icons/                       # logo.png, dot_{green,amber,red,blue,grey}.png (icons.py)
 ```
 
-Shipped as `skyray.zip` (gitignored, built locally) — rebuild/reinstall rule: `CLAUDE.md`'s Critical Discipline. Payload shapes and the editor↔server connection: [`../../docs/sync-protocol.md`](../../docs/sync-protocol.md).
+Shipped as three zips that `build.py` (the repo root) builds locally and git ignores: `skyray-local.zip`, `skyray-dev.zip` and `skyray-prod.zip`, each with its own `bl_info` name and `DEFAULT_SERVER_URL` (`CLAUDE.md`'s Builds). The rebuild/reinstall rule: `CLAUDE.md`'s Critical Discipline. Payload shapes and the editor↔server connection: [`../../docs/sync-protocol.md`](../../docs/sync-protocol.md).

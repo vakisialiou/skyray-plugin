@@ -1,6 +1,7 @@
 import bpy
 
 from . import connection_ui, send_job, send_ui, status
+from .constants import ADDON_NAME
 from .icons import dot, logo
 
 
@@ -9,7 +10,7 @@ class SKYRAY_PT_main_panel(bpy.types.Panel):
     missing (or its project), then what it can send, one row per channel."""
 
     bl_idname = "SKYRAY_PT_main_panel"
-    bl_label = "Skyray"
+    bl_label = ADDON_NAME
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "Skyray"

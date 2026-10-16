@@ -1,14 +1,14 @@
-"""Account buttons: Connect (device pairing approved in the browser),
-Cancel, Open browser again, Disconnect, the local dev-server shortcut, and
-Open Preferences for Online Access.
+"""Account buttons: Connect (device pairing approved in the browser, for
+this Blender session), Cancel, Open browser again, Disconnect, the local
+dev-server shortcut, and Open Preferences for Online Access.
 """
 
 import socket
 
 import bpy
 
-from . import api_client, credentials, runtime, status
-from .connection import is_local
+from . import api_client, runtime, status
+from .connection import is_local, session_entry
 
 _NAME_MAX = 60
 _TIMEOUT_S = 10.0
@@ -22,7 +22,10 @@ def device_name() -> str:
 class SKYRAY_OT_connect(bpy.types.Operator):
     bl_idname = "skyray.connect"
     bl_label = "Connect account"
-    bl_description = "Connects this computer to your Skyray account: approve the code in the browser that opens"
+    bl_description = (
+        "Connects this Blender session to your Skyray account until Blender closes: "
+        "approve the code in the browser that opens"
+    )
 
     @classmethod
     def poll(cls, context):
@@ -74,7 +77,7 @@ class SKYRAY_OT_reopen_link(bpy.types.Operator):
 class SKYRAY_OT_disconnect(bpy.types.Operator):
     bl_idname = "skyray.disconnect"
     bl_label = "Disconnect"
-    bl_description = "Disconnects this computer from your Skyray account and revokes its device token"
+    bl_description = "Disconnects from your Skyray account: revokes this session's device and forgets the project"
 
     @classmethod
     def poll(cls, context):
@@ -84,7 +87,7 @@ class SKYRAY_OT_disconnect(bpy.types.Operator):
         # Disconnect revokes the token on the server; forgetting it only here
         # would leave the device connected in the browser.
         if not current.online:
-            cls.poll_message_set(f"{status.ONLINE_OFF_TEXT}: Disconnect also revokes this computer on the server")
+            cls.poll_message_set(f"{status.ONLINE_OFF_TEXT}: Disconnect also revokes this session's device on the server")
             return False
         return True
 
@@ -128,7 +131,7 @@ class SKYRAY_OT_open_preferences(bpy.types.Operator):
 
 
 def _dev_token(server_url: str, name: str) -> tuple:
-    """(credentials entry, "") or (None, why not)."""
+    """(this session's device entry, "") or (None, why not)."""
     try:
         code, data = api_client.request(
             "POST", f"{server_url}/api/dev/device-token", body={"user": "dev", "name": name}, timeout=_TIMEOUT_S
@@ -137,4 +140,4 @@ def _dev_token(server_url: str, name: str) -> tuple:
         return None, f"Can't reach the server: {error}"
     if not api_client.ok(code) or not isinstance(data, dict) or not isinstance(data.get("deviceToken"), str):
         return None, api_client.error_message(code, data)
-    return credentials.from_grant(data["deviceToken"], data.get("device")), ""
+    return session_entry(data["deviceToken"], data.get("device")), ""

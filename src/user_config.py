@@ -1,8 +1,7 @@
 """The add-on's own folder under the user config dir — outside Blender's
 folders, so it outlives restarts, upgrades and every .blend — and atomic
-JSON writes into it.
-
-No bpy here: the connection worker thread writes the credentials file too.
+JSON writes into it: link_journal.py's journals. Nothing about the account
+or the connection is kept there.
 """
 
 import json

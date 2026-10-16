@@ -1,13 +1,20 @@
 """The link to the Skyray server. A daemon worker thread does the device
-pairing, the heartbeat every few seconds and the project-list fetch. A Send
-hands its progress to that heartbeat (mark_sending); the one-off calls (the
-sync upload, New project, the dev token) borrow the token via session().
+pairing and the heartbeat every few seconds. A Send hands its progress to
+that heartbeat (mark_sending); the one-off calls (the sync upload, Choose's
+project list, New project, the dev token) borrow the token via session().
+
+The device token lives in memory for this Blender session only, never on
+disk: closing Blender (or disabling the add-on, or switching servers)
+revokes it on the server, best effort, and the next session connects anew.
+SKYRAY_TOKEN (headless/CI) is used instead of pairing; it is never revoked
+on exit, only by Disconnect.
 
 The worker never touches bpy. The main thread (runtime.py) hands it the
 active scene's context and reads its results through one lock; a wake event
 makes it beat at once when the context or a send's progress changed.
 """
 
+import os
 import threading
 import time
 import traceback
@@ -16,7 +23,7 @@ from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlsplit
 
-from . import api_client, credentials, pairing, status
+from . import api_client, pairing, status
 from .constants import CLIENT_KIND, PLUGIN_VERSION, PROTOCOL_VERSION
 
 # One per Blender process: two windows on one device stay apart in the
@@ -26,18 +33,21 @@ INSTANCE_ID = uuid.uuid4().hex
 _BACKOFF_S = (1.0, 2.0, 5.0, 10.0, 30.0)  # retries while the server is unreachable
 _HEARTBEAT_S = 3.0  # until the server names its own interval
 _OUTDATED_RETRY_S = 60.0
-_PROJECTS_MAX_AGE_S = 60.0
-_PROJECTS_RETRY_S = 10.0
 _DEV_RETRY_S = 30.0
 _IDLE_S = 5.0
 _PROGRESS_BEAT_S = 1.0  # at most one extra heartbeat per second for a send's progress
 _TIMEOUT_S = 10.0
 _ANNOUNCE_TIMEOUT_S = 5.0
 _LEAVE_TIMEOUT_S = 2.0
+_EXIT_TIMEOUT_S = 2.0  # per call while Blender closes
 _TEXT_MAX = 200  # the server's limit for file and scene names
 _ID_MAX = 64
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+_ENV_TOKEN = "SKYRAY_TOKEN"
+# Set once the server rejected SKYRAY_TOKEN (or Disconnect dropped it): the process stops offering it.
+_env_rejected = False
 
 
 def is_local(server_url: str) -> bool:
@@ -65,7 +75,6 @@ class Snapshot:
     beat: Optional[dict]  # the last heartbeat answer
     beat_project_id: Optional[str]  # the projectId that heartbeat carried
     dev_available: bool
-    revision: int
 
 
 @dataclass(frozen=True)
@@ -98,8 +107,9 @@ class Connection:
         self._context = {"projectId": None, "file": "Untitled", "scene": ""}
         self._sending: Optional[dict] = None
         self._progress_beat_at = 0.0
-        # The device token in use (a credentials entry) and its generation:
-        # a result computed under an older generation is dropped.
+        # The device token in use ({deviceToken, deviceId, deviceName, email,
+        # source: 'session' | 'env'}) and its generation: a result computed
+        # under an older generation is dropped.
         self._entry: Optional[dict] = None
         self._generation = 0
         # Pending work.
@@ -108,8 +118,6 @@ class Connection:
         self._beat_requested = False
         self._beat_due = 0.0
         self._failures = 0
-        self._projects_wanted = False
-        self._projects_retry_at = 0.0
         self._dev_wanted = False
         self._dev_retry_at = 0.0
         # Results.
@@ -119,10 +127,7 @@ class Connection:
         self._outdated = False
         self._beat: Optional[dict] = None
         self._beat_project_id: Optional[str] = None
-        self._projects: Optional[tuple] = None
-        self._projects_at = 0.0
         self._dev_available: Optional[bool] = None
-        self._revision = 0
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
@@ -134,17 +139,28 @@ class Connection:
             self._thread = threading.Thread(target=self._run, args=(self._stop,), name="skyray-connection", daemon=True)
             self._thread.start()
 
-    def stop(self, leave: bool) -> None:
-        """Stops the worker; `leave` tells the server this editor is gone (≤2 s)."""
+    def stop(self) -> None:
+        """Stops the worker as Blender closes or the add-on goes. This
+        session's token dies with it, so it is revoked on the server, and a
+        Disconnect still queued goes first (≤2 s a call); SKYRAY_TOKEN only
+        leaves the editor list."""
         with self._lock:
             thread, stop = self._thread, self._stop
             self._thread = self._stop = None
-            server, token, online = self._server_url, self._token(), self._online
+            server, entry, online = self._server_url, self._entry, self._online
+            revocations, self._revocations = self._revocations, []
+            self._entry = None
+            self._attempt = None
         if stop is not None:
             stop.set()
             self._wake.set()
-        if leave and token and online:
-            self._leave(server, token)
+        if online:
+            for revoked_server, revoked_token in revocations:
+                self._revoke_remotely(revoked_server, revoked_token, _EXIT_TIMEOUT_S)
+            if entry is not None and entry.get("source") == "env":
+                self._leave(server, entry["deviceToken"])
+            elif entry is not None:
+                self._revoke_remotely(server, entry["deviceToken"], _EXIT_TIMEOUT_S)
         if thread is not None:
             thread.join(timeout=0.5)
 
@@ -154,26 +170,27 @@ class Connection:
                 self._entry
                 or self._attempt
                 or self._revocations
-                or self._projects_wanted
                 or self._dev_wanted
             )
 
     # ── Inputs (main thread) ─────────────────────────────────────────
 
-    def configure(self, server_url: str, entry: Optional[dict]) -> None:
-        """The server to use and its stored device entry (credentials.load)."""
+    def configure(self, server_url: str) -> None:
+        """The server to use: at start, and whenever it changes. A token of
+        the server before is revoked there; SKYRAY_TOKEN, when set, is used
+        at once."""
         with self._lock:
-            same_server = server_url == self._server_url
-            if same_server and _token_of(entry) == self._token():
+            if server_url == self._server_url:
                 return
+            if self._entry is not None and self._entry.get("source") != "env":
+                self._revocations.append((self._server_url, self._entry["deviceToken"]))
             self._server_url = server_url
-            self._entry = entry
+            self._entry = _env_entry()
             self._reset_results()
-            if not same_server:
-                self._attempt = None
-                self._notice = ""
-                self._dev_available = None
-                self._dev_retry_at = 0.0
+            self._attempt = None
+            self._notice = ""
+            self._dev_available = None
+            self._dev_retry_at = 0.0
         self._kick()
 
     def set_online(self, online: bool) -> None:
@@ -202,18 +219,6 @@ class Connection:
             self._beat_requested = True
         self._wake.set()
 
-    def want_projects(self, force: bool = False) -> None:
-        """Asks the worker for the project list when it's missing or stale (or `force`)."""
-        with self._lock:
-            if self._entry is None or self._projects_wanted:
-                return
-            now = time.monotonic()
-            stale = self._projects is None or now - self._projects_at > _PROJECTS_MAX_AGE_S
-            if not force and not (stale and now >= self._projects_retry_at):
-                return
-            self._projects_wanted = True
-        self._kick()
-
     def want_dev_check(self) -> None:
         """Asks a local server whether it offers the dev shortcut (once per server)."""
         with self._lock:
@@ -237,7 +242,7 @@ class Connection:
             self._attempt = None
 
     def disconnect(self) -> None:
-        """Forgets the device locally now; the worker revokes it server-side."""
+        """Forgets the device now; the worker revokes it server-side."""
         with self._lock:
             entry, server = self._entry, self._server_url
             self._attempt = None
@@ -247,13 +252,12 @@ class Connection:
             self._entry = None
             self._notice = ""
             self._reset_results()
-            _store(credentials.forget, server, entry)
+            _drop(entry)
         self._kick()
 
     def adopt(self, entry: dict) -> None:
-        """Uses a freshly issued device token (dev shortcut) and stores it."""
+        """Uses a freshly issued device token (dev shortcut) for this session."""
         with self._lock:
-            _store(credentials.save, self._server_url, entry)
             self._attempt = None
             self._entry = entry
             self._notice = ""
@@ -282,7 +286,6 @@ class Connection:
                 beat=self._beat,
                 beat_project_id=self._beat_project_id,
                 dev_available=bool(self._dev_available),
-                revision=self._revision,
             )
 
     def connected(self) -> bool:
@@ -292,11 +295,6 @@ class Connection:
     def pairing(self) -> bool:
         with self._lock:
             return self._attempt is not None
-
-    def projects(self) -> tuple:
-        """((id, name), …) from the last fetch, newest first; () before one."""
-        with self._lock:
-            return self._projects or ()
 
     # ── Calls on the main thread ─────────────────────────────────────
 
@@ -341,7 +339,7 @@ class Connection:
         with self._lock:
             if generation != self._generation or self._entry is None:
                 return
-            _store(credentials.forget, self._server_url, self._entry)
+            _drop(self._entry)
             self._entry = None
             self._notice = status.REVOKED_TEXT
             self._reset_results()
@@ -351,15 +349,6 @@ class Connection:
         with self._lock:
             if generation == self._generation and self._beat is not None:
                 self._beat = {**self._beat, "viewers": viewers}
-
-    def add_project(self, generation: int, project_id: str, name: str) -> None:
-        """A project created here goes first in the list without a refetch."""
-        with self._lock:
-            if generation != self._generation:
-                return
-            listed = tuple(item for item in (self._projects or ()) if item[0] != project_id)
-            self._projects = ((project_id, name),) + listed
-            self._revision += 1
 
     # ── Worker ───────────────────────────────────────────────────────
 
@@ -388,9 +377,7 @@ class Connection:
             beat = token is not None and (self._beat_requested or now >= self._beat_due)
             if beat:
                 self._beat_requested = False
-            projects = token is not None and self._projects_wanted
             dev_check = token is None and self._dev_wanted
-            self._projects_wanted = self._projects_wanted and not projects
             self._dev_wanted = self._dev_wanted and not dev_check
 
         for revoked_server, revoked_token in revocations:
@@ -400,8 +387,6 @@ class Connection:
             delays.append(self._pair(attempt, server))
         if beat:
             self._heartbeat(server, token, generation, _TIMEOUT_S)
-        if projects:
-            self._fetch_projects(server, token, generation)
         if dev_check:
             self._check_dev(server)
         with self._lock:
@@ -438,11 +423,10 @@ class Connection:
             attempt.next_poll = time.monotonic() + result.wait
             return result.wait
 
-        entry = credentials.from_grant(result.token, result.device)
+        entry = session_entry(result.token, result.device)
         with self._lock:
             current = self._attempt is attempt and server == self._server_url
             if current:
-                _store(credentials.save, server, entry)
                 self._attempt = None
                 self._entry = entry
                 self._notice = ""
@@ -500,19 +484,15 @@ class Connection:
             self._reachable, self._error, self._outdated, self._failures = True, "", False, 0
             self._beat, self._beat_project_id = data, context["projectId"]
             self._beat_due = time.monotonic() + _interval(data.get("heartbeatInterval"))
-            refreshed = self._refreshed_entry(data)
-        if refreshed is not None:
-            _store(credentials.update, server, token, email=refreshed["email"], deviceName=refreshed["deviceName"])
+            self._refresh_entry(data)
         return code, data
 
-    def _refreshed_entry(self, beat: dict) -> Optional[dict]:
-        """The entry with the account email/device name the server reported, when they changed."""
+    def _refresh_entry(self, beat: dict) -> None:
+        """The account email and device name the server reported (lock held)."""
         email, name = _field(beat, "user", "email"), _field(beat, "device", "name")
         entry = self._entry
-        if entry is None or (entry.get("email") == email and entry.get("deviceName") == name):
-            return None
-        self._entry = {**entry, "email": email, "deviceName": name}
-        return self._entry
+        if entry is not None and (entry.get("email") != email or entry.get("deviceName") != name):
+            self._entry = {**entry, "email": email, "deviceName": name}
 
     def _unreachable(self, generation: int, error: str) -> None:
         with self._lock:
@@ -521,28 +501,6 @@ class Connection:
             self._reachable, self._error = False, error
             self._failures += 1
             self._beat_due = time.monotonic() + _backoff(self._failures)
-
-    def _fetch_projects(self, server: str, token: str, generation: int) -> None:
-        try:
-            code, data = api_client.request("GET", f"{server}/api/projects?summary=1", token=token, timeout=_TIMEOUT_S)
-        except api_client.TransportError:
-            code, data = None, None
-        if code == 401:
-            self.revoked(generation)
-            return
-        with self._lock:
-            if generation != self._generation:
-                return
-            if code is None or not api_client.ok(code) or not isinstance(data, list):
-                self._projects_retry_at = time.monotonic() + _PROJECTS_RETRY_S
-                return
-            self._projects = tuple(
-                (item["id"], str(item.get("name") or "Untitled"))
-                for item in data
-                if isinstance(item, dict) and isinstance(item.get("id"), str)
-            )
-            self._projects_at = time.monotonic()
-            self._revision += 1
 
     def _check_dev(self, server: str) -> None:
         if not is_local(server):
@@ -557,11 +515,11 @@ class Connection:
             if server == self._server_url:
                 self._dev_available = api_client.ok(code) and isinstance(data, dict) and data.get("dev") is True
 
-    def _revoke_remotely(self, server: str, token: str) -> None:
-        """Best effort: leave the editor list, then revoke the token server-side."""
-        self._leave(server, token)
+    def _revoke_remotely(self, server: str, token: str, timeout: float = _ANNOUNCE_TIMEOUT_S) -> None:
+        """Best effort: revokes the token server-side, which drops this
+        editor from every list too, and the device from Settings → Devices."""
         try:
-            api_client.request("DELETE", f"{server}/api/devices/me", token=token, timeout=_ANNOUNCE_TIMEOUT_S)
+            api_client.request("DELETE", f"{server}/api/devices/me", token=token, timeout=timeout)
         except api_client.TransportError:
             pass
 
@@ -592,10 +550,6 @@ class Connection:
         self._beat_project_id = None
         self._failures = 0
         self._beat_requested = True
-        self._projects = None
-        self._projects_wanted = False
-        self._projects_retry_at = 0.0
-        self._revision += 1
 
     def _kick(self) -> None:
         """Wakes the worker, starting it first if there's work (call without the lock)."""
@@ -604,12 +558,31 @@ class Connection:
         self._wake.set()
 
 
-def _store(write, *args, **kwargs) -> None:
-    """A credentials-file write; a failure is logged, the in-memory token stays usable."""
-    try:
-        write(*args, **kwargs)
-    except OSError as error:
-        print(f"Skyray: couldn't update {credentials.path()}: {error}")
+def session_entry(token: str, device: object) -> dict:
+    """A freshly issued token and its `device` {id, name}, for this session."""
+    device = device if isinstance(device, dict) else {}
+    return {
+        "deviceToken": token,
+        "deviceId": str(device.get("id") or ""),
+        "deviceName": str(device.get("name") or ""),
+        "email": "",
+        "source": "session",
+    }
+
+
+def _env_entry() -> Optional[dict]:
+    """SKYRAY_TOKEN's entry, unless the server rejected it."""
+    token = os.environ.get(_ENV_TOKEN, "").strip()
+    if not token or _env_rejected:
+        return None
+    return {"deviceToken": token, "deviceId": "", "deviceName": "", "email": "", "source": "env"}
+
+
+def _drop(entry: dict) -> None:
+    """An entry the server rejected or Disconnect dropped: SKYRAY_TOKEN isn't offered again."""
+    global _env_rejected
+    if entry.get("source") == "env":
+        _env_rejected = True
 
 
 def _token_of(entry: Optional[dict]) -> Optional[str]:

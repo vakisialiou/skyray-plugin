@@ -1,52 +1,54 @@
-"""Which Skyray project a scene sends to: the project id (set by the Scene
-project dropdown or New project, never typed — the raw field shows only with
-Developer Extras on) and its cached display name. Plain scene data, not
-secrets: .blend files get shared, and a shared file keeps its binding until
-someone picks another project. The binding a Send goes to is journaled with
-the ids it sends (link_journal.py), so an unsaved close loses neither.
+"""The project this Blender session sends to, held in memory only: chosen
+from the account's projects after connecting (Choose, a fresh list each
+time, or New project). Opening a file and losing the connection (Disconnect,
+a revoked device, Blender closing) clear it, so a .blend never names a
+project. What makes a scene's objects themselves stays in the file
+(object_id.py, sent_ids.py).
 """
 
 import bpy
 
-from . import link_journal
+# An older add-on's binding, stored on scenes; dropped as its file opens.
+_LEGACY = ("skyray_project_id", "skyray_project_name")
+
+_id = ""
+_name = ""
 
 
-def register_properties() -> None:
-    bpy.types.Scene.skyray_project_id = bpy.props.StringProperty(
-        name="Project ID",
-        description="The Skyray project this scene sends to",
-        default="",
-    )
-    bpy.types.Scene.skyray_project_name = bpy.props.StringProperty(
-        name="Project Name",
-        description="The bound project's name as the server last reported it",
-        default="",
-    )
+def selected_id() -> str:
+    return _id
 
 
-def unregister_properties() -> None:
-    del bpy.types.Scene.skyray_project_name
-    del bpy.types.Scene.skyray_project_id
+def selected_name() -> str:
+    return _name
 
 
-def scene_project_id(scene: bpy.types.Scene) -> str:
-    return scene.skyray_project_id.strip()
+def select(project_id: str, name: str) -> None:
+    global _id, _name
+    _id, _name = project_id.strip(), name
 
 
-def get_project_id(context: bpy.types.Context) -> str:
-    return scene_project_id(context.scene)
+def rename(project_id: str, name: str) -> None:
+    """The server's name for the chosen project, as its heartbeat reports it."""
+    global _name
+    if project_id == _id and name:
+        _name = name
 
 
-def bind(scene: bpy.types.Scene, project_id: str, name: str) -> None:
-    scene.skyray_project_id = project_id
-    scene.skyray_project_name = name
+def clear() -> None:
+    select("", "")
 
 
-def record_binding(scene: bpy.types.Scene) -> None:
-    """A Send starts: its project stays journaled with the ids it sends."""
-    link_journal.record(
-        [
-            (scene, "skyray_project_id", scene.skyray_project_id),
-            (scene, "skyray_project_name", scene.skyray_project_name),
-        ]
-    )
+def drop_legacy() -> None:
+    """Removes an older add-on's binding from the open file's own scenes: the
+    value its property kept (system storage, which outlives the property) and
+    the custom property an older journal's replay sets."""
+    for scene in bpy.data.scenes:
+        if scene.library is not None:
+            continue
+        for group in (scene.bl_system_properties_get(), scene):
+            if group is None:
+                continue
+            for key in _LEGACY:
+                if key in group:
+                    del group[key]

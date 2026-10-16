@@ -1,6 +1,6 @@
 """The connection status the panel, the status bar and every Send button's
-poll() read. evaluate() turns the worker's snapshot plus the active scene's
-binding into one state — the first failing check wins:
+poll() read. evaluate() turns the worker's snapshot plus the session's
+project (project.py) into one state — the first failing check wins:
 
 NOT_CONNECTED (WAITING_APPROVAL while pairing) → ONLINE_ACCESS_OFF →
 CONNECTING / OFFLINE → OUTDATED → NO_PROJECT → NO_BROWSER → READY.
@@ -49,7 +49,7 @@ ICONS = {
     READY: "CHECKMARK",
 }
 
-# States that need an account-level fix; the rest are about the scene's project.
+# States that need an account-level fix; the rest are about the session's project.
 ACCOUNT_STATES = (NOT_CONNECTED, WAITING_APPROVAL, ONLINE_ACCESS_OFF, CONNECTING, OFFLINE, OUTDATED)
 
 
@@ -61,7 +61,7 @@ class Status:
     online: bool = True  # network calls allowed (see runtime.network_allowed)
     email: str = ""
     device_name: str = ""
-    project_id: str = ""  # set once the server verified the scene's project
+    project_id: str = ""  # set once the server verified the session's project
     project_name: str = ""
     viewers: int = 0
     web_url: str = ""
@@ -69,7 +69,6 @@ class Status:
     verification_url: str = ""
     dev_available: bool = False
     server_url: str = ""
-    revision: int = 0  # bumps when the project list changes
 
     def key(self) -> tuple:
         """Everything a redraw would show; the UI redraws when it changes."""
@@ -89,7 +88,7 @@ def set_current(status: Status) -> None:
 
 
 def evaluate(snapshot, online: bool, bound_id: str, bound_name: str) -> Status:
-    """`snapshot` is a connection.Snapshot; `bound_id`/`bound_name` the active scene's binding."""
+    """`snapshot` is a connection.Snapshot; `bound_id`/`bound_name` the session's project."""
     base = Status(
         connected=snapshot.connected,
         online=online,
@@ -98,7 +97,6 @@ def evaluate(snapshot, online: bool, bound_id: str, bound_name: str) -> Status:
         project_name=bound_name,
         server_url=snapshot.server_url,
         dev_available=snapshot.dev_available,
-        revision=snapshot.revision,
     )
     if not snapshot.connected:
         if snapshot.pairing:

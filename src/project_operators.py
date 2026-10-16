@@ -1,6 +1,6 @@
-"""Scene project buttons: refresh the account's project list, create a
-project for this .blend and bind the scene to it, open the bound project in
-the browser.
+"""Project buttons: choose where this session sends from the account's
+projects (asked fresh on every click), create one for this .blend, open the
+chosen one in the browser, manage the account's storage.
 """
 
 import os
@@ -8,18 +8,30 @@ from urllib.parse import quote
 
 import bpy
 
-from . import api_client, project, runtime, status
+from . import api_client, project, runtime, send_job, status
 
 _NAME_MAX = 80  # the server's limit
 _TIMEOUT_S = 10.0
 # States where the server answered for this device, so its project calls work.
 _SERVER_STATES = (status.NO_PROJECT, status.NO_BROWSER, status.READY)
 
+# The list the last Choose fetched, (id, name) newest first, and its enum
+# items: Blender keeps only pointers to the strings an items callback returns.
+_listed: list = []
+_items: list = []
 
-class SKYRAY_OT_refresh_projects(bpy.types.Operator):
-    bl_idname = "skyray.refresh_projects"
-    bl_label = "Refresh Projects"
-    bl_description = "Fetches this account's project list again"
+
+def _listed_items(_self, _context):
+    return _items
+
+
+class SKYRAY_OT_choose_project(bpy.types.Operator):
+    bl_idname = "skyray.choose_project"
+    bl_label = "Choose project"
+    bl_description = "Lists this account's projects, fresh from the server: this session sends to the one you pick"
+    bl_property = "project"
+
+    project: bpy.props.EnumProperty(name="Project", items=_listed_items, options={"SKIP_SAVE"})
 
     @classmethod
     def poll(cls, context):
@@ -27,17 +39,35 @@ class SKYRAY_OT_refresh_projects(bpy.types.Operator):
         if current.state not in _SERVER_STATES:
             cls.poll_message_set(current.message)
             return False
+        if send_job.active() is not None:
+            cls.poll_message_set("A Send is running")
+            return False
         return True
 
+    def invoke(self, context, event):
+        listed, error = fetch_projects()
+        if listed is None:
+            self.report({"ERROR"}, error)
+            return {"CANCELLED"}
+        if not listed:
+            self.report({"INFO"}, "This account has no projects yet: create one")
+            return {"CANCELLED"}
+        context.window_manager.invoke_search_popup(self)
+        return {"RUNNING_MODAL"}
+
     def execute(self, context):
-        runtime.connection().want_projects(force=True)
+        names = dict(_listed)
+        if self.project not in names:
+            return {"CANCELLED"}
+        project.select(self.project, names[self.project])
+        runtime.refresh()
         return {"FINISHED"}
 
 
 class SKYRAY_OT_new_project(bpy.types.Operator):
     bl_idname = "skyray.new_project"
     bl_label = "New project"
-    bl_description = "Creates a Skyray project named after this .blend file (or the scene) and binds this scene to it"
+    bl_description = "Creates a Skyray project named after this .blend file (or the scene); this session sends to it"
 
     name: bpy.props.StringProperty(
         name="Name",
@@ -60,7 +90,7 @@ class SKYRAY_OT_new_project(bpy.types.Operator):
         if created is None:
             self.report({"ERROR"}, error)
             return {"CANCELLED"}
-        project.bind(context.scene, created["id"], created["name"])
+        project.select(created["id"], created["name"])
         runtime.refresh()
         self.report({"INFO"}, f"Created project {created['name']}")
         return {"FINISHED"}
@@ -69,7 +99,7 @@ class SKYRAY_OT_new_project(bpy.types.Operator):
 class SKYRAY_OT_open_project(bpy.types.Operator):
     bl_idname = "skyray.open_project"
     bl_label = "Open in browser"
-    bl_description = "Opens this scene's project in the Skyray web app"
+    bl_description = "Opens the chosen project in the Skyray web app"
 
     @classmethod
     def poll(cls, context):
@@ -96,6 +126,34 @@ class SKYRAY_OT_manage_storage(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def fetch_projects() -> tuple:
+    """The account's projects, asked now: ([(id, name), …] newest first, "")
+    or (None, why not). A click waits for it, so it runs on the main thread."""
+    global _listed, _items
+    connection = runtime.connection()
+    session = connection.session()
+    if session is None:
+        return None, status.NOT_CONNECTED_TEXT
+    try:
+        code, data = api_client.request(
+            "GET", f"{session.server_url}/api/projects?summary=1", token=session.token, timeout=_TIMEOUT_S
+        )
+    except api_client.TransportError as error:
+        return None, f"Can't reach the server: {error}"
+    if code == 401:
+        connection.revoked(session.generation)
+        return None, status.REVOKED_TEXT
+    if not api_client.ok(code) or not isinstance(data, list):
+        return None, api_client.error_message(code, data)
+    _listed = [
+        (item["id"], str(item.get("name") or "Untitled"))
+        for item in data
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    ]
+    _items = [(project_id, name, "") for project_id, name in _listed]
+    return _listed, ""
+
+
 def default_name(context) -> str:
     stem = os.path.splitext(bpy.path.basename(bpy.data.filepath))[0]
     return stem or context.scene.name or "Untitled"
@@ -118,6 +176,4 @@ def _create(name: str) -> tuple:
         return None, status.REVOKED_TEXT
     if not api_client.ok(code) or not isinstance(data, dict) or not isinstance(data.get("id"), str):
         return None, api_client.error_message(code, data)
-    created = {"id": data["id"], "name": str(data.get("name") or name)}
-    connection.add_project(session.generation, created["id"], created["name"])
-    return created, ""
+    return {"id": data["id"], "name": str(data.get("name") or name)}, ""

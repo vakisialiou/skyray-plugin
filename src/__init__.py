@@ -1,5 +1,5 @@
 bl_info = {
-    "name": "Skyray",
+    "name": "Skyray (local)",
     "author": "Skyray",
     "version": (0, 6, 3),
     "blender": (5, 2, 1),
@@ -19,9 +19,7 @@ from . import (
     operators,
     panel,
     preferences,
-    project,
     project_operators,
-    project_picker,
     render_settings_operators,
     runtime,
     send_job,
@@ -41,7 +39,7 @@ _classes = (
     account_operators.SKYRAY_OT_disconnect,
     account_operators.SKYRAY_OT_dev_connect,
     account_operators.SKYRAY_OT_open_preferences,
-    project_operators.SKYRAY_OT_refresh_projects,
+    project_operators.SKYRAY_OT_choose_project,
     project_operators.SKYRAY_OT_new_project,
     project_operators.SKYRAY_OT_open_project,
     project_operators.SKYRAY_OT_manage_storage,
@@ -62,8 +60,6 @@ _classes = (
 
 def register():
     web_settings.register()
-    project.register_properties()
-    project_picker.register_properties()
     send_operators.register_properties()
     icons.register()
     for cls in _classes:
@@ -82,8 +78,6 @@ def unregister():
         bpy.utils.unregister_class(cls)
     icons.unregister()
     send_operators.unregister_properties()
-    project_picker.unregister_properties()
-    project.unregister_properties()
     web_settings.unregister()
 
 

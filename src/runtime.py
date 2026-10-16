@@ -1,29 +1,26 @@
 """The main-thread side of the connection. A 0.5 s timer (plus the file
-load/save handlers) hands the active scene's project, the file and the scene
-name to the worker, turns the worker's results into status.current(), and
-redraws the UI only when what it shows changed. It also opens the browser
-for a pairing code, caches the verified project's name on the scene and
-tells link_journal.py about file loads and saves.
+load/save handlers) hands the server, the session's project, the file and
+the scene name to the worker, turns the worker's results into
+status.current(), and redraws the UI only when what it shows changed. It
+also opens the browser for a pairing code, keeps the project's name as the
+server reports it, clears the project when the connection is gone or another
+file opens, and tells link_journal.py about file loads and saves.
 """
 
-import time
 import traceback
 from typing import Optional
 
 import bpy
 from bpy.app.handlers import persistent
 
-from . import credentials, link_journal, preferences, project, status
+from . import link_journal, preferences, project, status
 from .connection import Connection, is_local
 
 _TICK_S = 0.5
-_CREDENTIALS_CHECK_S = 2.0  # while not connected: another Blender may connect this computer
 _ID_MAX = 64  # the server's limit for a project id
 
 _connection: Optional[Connection] = None
 _server_url: Optional[str] = None
-_credentials_mtime: Optional[float] = None
-_credentials_checked = 0.0
 _opened_code = ""
 _shown: Optional[tuple] = None
 
@@ -33,9 +30,10 @@ def connection() -> Connection:
 
 
 def register() -> None:
-    global _connection, _server_url, _credentials_mtime, _credentials_checked, _opened_code, _shown
+    global _connection, _server_url, _opened_code, _shown
     _connection = Connection(bpy.app.version_string)
-    _server_url, _credentials_mtime, _credentials_checked, _opened_code, _shown = None, None, 0.0, "", None
+    _server_url, _opened_code, _shown = None, "", None
+    project.clear()
     status.set_current(status.Status())
     bpy.types.WindowManager.skyray_redraw = bpy.props.IntProperty(options={"HIDDEN"}, update=_redrawn)
     for handlers, handler in _handlers():
@@ -53,8 +51,9 @@ def unregister() -> None:
         if handler in handlers:
             handlers.remove(handler)
     if _connection is not None:
-        _connection.stop(leave=True)
+        _connection.stop()
         _connection = None
+    project.clear()
     del bpy.types.WindowManager.skyray_redraw
 
 
@@ -94,52 +93,30 @@ def _tick() -> float:
 
 
 def _update() -> None:
+    global _server_url
     if _connection is None:
         return
     server_url = preferences.server_url()
-    _load_credentials(server_url)
+    if server_url != _server_url:
+        _server_url = server_url
+        _connection.configure(server_url)
     online = network_allowed(server_url)
     _connection.set_online(online)
+    if not _connection.connected():
+        project.clear()  # Disconnect, a revoked device, another server: choose again once connected
 
     scene = bpy.context.scene
-    bound_id = project.scene_project_id(scene)[:_ID_MAX] if scene else ""
+    project_id = project.selected_id()[:_ID_MAX]
     file_name = bpy.path.basename(bpy.data.filepath) or "Untitled"
-    _connection.set_context(bound_id or None, file_name, scene.name if scene else "")
+    _connection.set_context(project_id or None, file_name, scene.name if scene else "")
     if _connection.needs_thread():
         _connection.start()
 
-    current = status.evaluate(
-        _connection.snapshot(), online, bound_id, scene.skyray_project_name if scene else ""
-    )
+    current = status.evaluate(_connection.snapshot(), online, project_id, project.selected_name())
     status.set_current(current)
     _open_pairing_link(current)
-    _cache_project_name(scene, current)
+    project.rename(current.project_id, current.project_name)
     _redraw_if_changed(current)
-
-
-def _load_credentials(server_url: str) -> None:
-    """Hands the worker this server's stored token: at start, when the server
-    changes, and — while not connected — when the credentials file changed.
-    """
-    global _server_url, _credentials_mtime, _credentials_checked
-    if server_url != _server_url:
-        _server_url = server_url
-        _credentials_mtime = credentials.mtime()
-        _connection.configure(server_url, credentials.load(server_url))
-        return
-    if _connection.connected() or _connection.pairing():
-        return
-    now = time.monotonic()
-    if now - _credentials_checked < _CREDENTIALS_CHECK_S:
-        return
-    _credentials_checked = now
-    mtime = credentials.mtime()
-    if mtime == _credentials_mtime:
-        return
-    _credentials_mtime = mtime
-    entry = credentials.load(server_url)
-    if entry is not None:
-        _connection.configure(server_url, entry)
 
 
 def _open_pairing_link(current: status.Status) -> None:
@@ -151,19 +128,6 @@ def _open_pairing_link(current: status.Status) -> None:
         return
     _opened_code = current.user_code
     open_url(current.verification_url)
-
-
-def _cache_project_name(scene: Optional[bpy.types.Scene], current: status.Status) -> None:
-    if scene is None or not current.project_id or not current.project_name:
-        return
-    if scene.skyray_project_name == current.project_name:
-        return
-    if project.scene_project_id(scene)[:_ID_MAX] != current.project_id:
-        return
-    try:
-        scene.skyray_project_name = current.project_name
-    except (AttributeError, RuntimeError, TypeError):
-        pass  # a linked scene is read-only
 
 
 def _redraw_if_changed(current: status.Status) -> None:
@@ -193,6 +157,8 @@ def _on_load(*_args) -> None:
 
     send_job.cancel_active("Another file was opened")
     link_journal.opened()
+    project.clear()
+    project.drop_legacy()
     _on_file_change()
 
 
@@ -214,7 +180,7 @@ def _on_exit(*_args) -> None:
 
     send_job.cancel_active("Blender is closing")
     if _connection is not None:
-        _connection.stop(leave=True)
+        _connection.stop()
 
 
 def _handlers() -> tuple:

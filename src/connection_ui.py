@@ -2,8 +2,8 @@
 popover: the status dot and word, the setup card for whatever step is
 missing (account, approval, online access, project, browser), the project
 row with the account menu. Drawing never waits on the network: it reads
-status.current(), and asking for the project list or the dev check only
-flags work for the connection worker.
+status.current(), and asking for the dev check only flags work for the
+connection worker; the project list is asked when Choose is clicked.
 """
 
 import bpy
@@ -61,10 +61,10 @@ class SKYRAY_MT_account(bpy.types.Menu):
 
 
 def draw_project_row(layout, context, dot: str) -> None:
-    """Project dropdown with its status dot, Open in Browser, the account menu."""
-    runtime.connection().want_projects()
+    """The chosen project with its status dot (a click chooses another), Open in Browser, the account menu."""
+    current = status.current()
     row = layout.row(align=True)
-    row.prop(context.scene, "skyray_project_pick", text="", icon_value=icons.dot(dot))
+    row.operator("skyray.choose_project", text=current.project_name or "Project", icon_value=icons.dot(dot))
     row.operator("skyray.open_project", text="", icon="URL")
     row.menu(SKYRAY_MT_account.bl_idname, text="", icon="USER")
 
@@ -86,7 +86,7 @@ def draw_setup_card(layout, context, current: status.Status) -> None:
             _draw_online_off(box, context)
         else:
             box.label(text="Connect your Skyray account", icon_value=icons.dot("grey"))
-            wrap(box, context, "Approve this computer once in the browser. After that every scene can send to your projects.")
+            wrap(box, context, "Approve the code in the browser. The connection lasts until Blender closes.")
             primary(box, "skyray.connect", "Connect Account", "LINKED")
             if current.dev_available and is_local(current.server_url):
                 dev = box.row()
@@ -123,16 +123,11 @@ def draw_setup_card(layout, context, current: status.Status) -> None:
         wrap(box, context, "Install the latest Skyray add-on, then restart Blender.")
         return
     if state == status.NO_PROJECT:
-        box.label(text="Choose a project for this scene", icon_value=icons.dot("amber"))
-        runtime.connection().want_projects()
-        row = box.row(align=True)
-        row.prop(context.scene, "skyray_project_pick", text="")
-        row.operator("skyray.refresh_projects", text="", icon="FILE_REFRESH")
+        box.label(text="Choose a project", icon_value=icons.dot("amber"))
+        primary(box, "skyray.choose_project", "Choose Project…", "DOWNARROW_HLT")
         box.operator("skyray.new_project", text=f"New Project: {default_name(context)}", icon="ADD")
         if current.message not in (status.NO_PROJECT_TEXT, status.CHECKING_TEXT):
             note(box, current.message, icon="INFO")
-        if context.preferences.view.show_developer_ui:
-            box.prop(context.scene, "skyray_project_id")
         return
     if state == status.NO_BROWSER:
         draw_project_row(box, context, "amber")

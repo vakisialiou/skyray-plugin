@@ -527,7 +527,7 @@ def can_send(operator_class, context) -> bool:
     if current.state != status.READY:
         operator_class.poll_message_set(current.message)
         return False
-    if project.get_project_id(context) != current.project_id:
+    if project.selected_id() != current.project_id:
         operator_class.poll_message_set(status.CHECKING_TEXT)
         return False
     if _active is not None:
@@ -543,13 +543,12 @@ def start(context, channels: tuple, scope: str, force: bool = False) -> SendJob:
     job = SendJob(
         context.scene,
         context.view_layer,
-        project.get_project_id(context),
+        project.selected_id(),
         channels,
         scope,
         force,
     )
     _active = job
-    project.record_binding(context.scene)
     runtime.connection().mark_sending(0, 0, 0)
     if bpy.app.background:
         job.run_blocking()
