@@ -39,7 +39,7 @@ _PROGRESS_BEAT_S = 1.0  # at most one extra heartbeat per second for a send's pr
 _TIMEOUT_S = 10.0
 _ANNOUNCE_TIMEOUT_S = 5.0
 _LEAVE_TIMEOUT_S = 2.0
-_EXIT_TIMEOUT_S = 2.0  # per call while Blender closes
+_EXIT_TIMEOUT_S = 2.0  # all farewells together while Blender closes
 _TEXT_MAX = 200  # the server's limit for file and scene names
 _ID_MAX = 64
 
@@ -142,7 +142,7 @@ class Connection:
     def stop(self) -> None:
         """Stops the worker as Blender closes or the add-on goes. This
         session's token dies with it, so it is revoked on the server, and a
-        Disconnect still queued goes first (≤2 s a call); SKYRAY_TOKEN only
+        Disconnect still queued goes first (≤2 s in all); SKYRAY_TOKEN only
         leaves the editor list."""
         with self._lock:
             thread, stop = self._thread, self._stop
@@ -154,13 +154,17 @@ class Connection:
         if stop is not None:
             stop.set()
             self._wake.set()
+        farewells = []
         if online:
-            for revoked_server, revoked_token in revocations:
-                self._revoke_remotely(revoked_server, revoked_token, _EXIT_TIMEOUT_S)
-            if entry is not None and entry.get("source") == "env":
-                self._leave(server, entry["deviceToken"])
-            elif entry is not None:
-                self._revoke_remotely(server, entry["deviceToken"], _EXIT_TIMEOUT_S)
+            farewells = [(self._revoke_remotely, *revocation) for revocation in revocations]
+            if entry is not None:
+                farewell = self._leave if entry.get("source") == "env" else self._revoke_remotely
+                farewells.append((farewell, server, entry["deviceToken"]))
+        if farewells:
+            # Their own thread, all of them given 2 s: closing Blender never waits longer on the network.
+            sender = threading.Thread(target=_send_farewells, args=(farewells,), name="skyray-farewell", daemon=True)
+            sender.start()
+            sender.join(timeout=_EXIT_TIMEOUT_S)
         if thread is not None:
             thread.join(timeout=0.5)
 
@@ -556,6 +560,12 @@ class Connection:
         if self.needs_thread():
             self.start()
         self._wake.set()
+
+
+def _send_farewells(farewells: list) -> None:
+    """(call, server, token) each: a revocation or a leave, as Blender closes."""
+    for farewell, server, token in farewells:
+        farewell(server, token)
 
 
 def session_entry(token: str, device: object) -> dict:

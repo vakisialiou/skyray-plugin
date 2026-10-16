@@ -1,6 +1,6 @@
-"""Link data the add-on writes into the open .blend — object ids, the last
-Send's ids, the project a Send went to — kept in a journal outside the file
-as well, until the file is saved. Blender has no persistent object id of its
+"""Link data the add-on writes into the open .blend — object ids and the
+last Send's ids — kept in a journal outside the file as well, until the
+file is saved. Blender has no persistent object id of its
 own (an ID's session_uid lives one session), so these exist only as data in
 the file: closed without saving, or after a crash, they would be gone and
 the next Send would make every object new in the browser.

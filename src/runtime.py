@@ -13,7 +13,7 @@ from typing import Optional
 import bpy
 from bpy.app.handlers import persistent
 
-from . import link_journal, preferences, project, status
+from . import legacy, link_journal, preferences, project, status
 from .connection import Connection, is_local
 
 _TICK_S = 0.5
@@ -34,6 +34,7 @@ def register() -> None:
     _connection = Connection(bpy.app.version_string)
     _server_url, _opened_code, _shown = None, "", None
     project.clear()
+    legacy.drop_credentials()
     status.set_current(status.Status())
     bpy.types.WindowManager.skyray_redraw = bpy.props.IntProperty(options={"HIDDEN"}, update=_redrawn)
     for handlers, handler in _handlers():
@@ -158,7 +159,7 @@ def _on_load(*_args) -> None:
     send_job.cancel_active("Another file was opened")
     link_journal.opened()
     project.clear()
-    project.drop_legacy()
+    legacy.drop_binding()
     _on_file_change()
 
 

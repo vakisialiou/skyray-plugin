@@ -82,6 +82,9 @@ class SKYRAY_OT_new_project(bpy.types.Operator):
         if current.state not in _SERVER_STATES:
             cls.poll_message_set(current.message)
             return False
+        if send_job.active() is not None:
+            cls.poll_message_set("A Send is running")
+            return False
         return True
 
     def execute(self, context):
